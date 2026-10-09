@@ -17,9 +17,11 @@
 // 返回值里每个席位都带第一轮/第二轮的 runId：后续投票轮、验收轮可以拿它 resume，
 // 不必重跑第一轮。
 //
-// 耗时：单席位用时脚本里拿不到（run 结果没有时间字段），但在每个席位 asyncDir 的
-// status.json 里有 steps[0].durationMs，父会话按 runId/asyncDir 去读即可。
-// 所以返回值给客观数字（答案长度、turns、输入 token、cost、asyncDir），快慢判断由
+// 耗时：单席位用时脚本里拿不到——实测 `results[0]` 的实际键只有 index/agent/sessionName/task/
+// exitCode/usage/finalOutput/outputState/sessionFile/model/requestedModel/acceptance/artifactPaths/
+// transcriptPath，没有 durationMs，也没有 progressSummary（类型里有，跨到脚本时被投影掉了）。
+// 所以耗时改由父会话读每个席位 asyncDir 下 status.json 的 steps[0].durationMs。
+// 返回值只能给客观数字（答案长度、turns、输入 token、cost、asyncDir），快慢判断由
 // 父会话按 SKILL.md 的流程做。
 
 const seats = Array.isArray(args.seats) ? args.seats : [];
@@ -33,6 +35,20 @@ const tag = typeof args.tag === "string" && args.tag.trim() !== "" ? args.tag.tr
 function seatKey(seat, index) {
   const name = typeof seat.name === "string" ? seat.name.trim() : "";
   return name !== "" ? name : "seat" + (index + 1);
+}
+
+// runs.all 的 key 有硬约束：^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$，且同一批不能重复。
+// name 是用户手写在配置里的，可能带中文/空格/重名：直接当 key 会让整场在运行时失败
+// （报错文本里根本不会出现 name），同名同参还会被静默复用成一份答案（两席变一席）。
+function workflowKeys(labels) {
+  const used = new Set();
+  return labels.map((label, index) => {
+    const safe = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(label) ? label : "seat" + (index + 1);
+    let candidate = safe;
+    for (let suffix = 2; used.has(candidate); suffix += 1) candidate = safe + "-" + suffix;
+    used.add(candidate);
+    return candidate;
+  });
 }
 
 function modelRef(seat) {
@@ -77,11 +93,12 @@ function median(numbers) {
 }
 
 const names = seats.map(seatKey);
+const keys = workflowKeys(names);
 
 // 第一轮：同题、并行、互相隔离（context fresh，否则后面的人会被前面的答案锚定）
 const round1 = await runs.all(
   seats.map((seat, index) => ({
-    key: names[index],
+    key: keys[index],
     agent: "oracle",
     model: modelRef(seat),
     context: "fresh",
@@ -96,6 +113,7 @@ const first = round1.map((row, index) => {
   const text = cleanText(row && row.output ? String(row.output) : "");
   return {
     seat: names[index],
+    key: keys[index],
     model: modelRef(seats[index]),
     ok: !!(row && row.ok),
     runId: row && row.runId ? row.runId : null,
@@ -157,6 +175,8 @@ function packetFor(self) {
     "2. 你被说服了什么（没有就说没有，别为了交卷硬凑）",
     "3. 你修订后的结论",
     "如果谁的判断更立得住，直接承认，不要为了保面子硬撑。不要复述他们的答案。",
+    // 第一轮要求过不代表这一轮会给：实测有席位改成写"修订结论"，导致 stance 抽不到
+    "最后一行必须重新写一次：【结论】<你修订后的一句话主张，40 字以内>，后面不要再加内容。",
   ];
   return head.concat(body, tail).join("\n");
 }
@@ -164,7 +184,7 @@ function packetFor(self) {
 // resume 的子会话会沿用第一轮那个子会话的输出路径，必须显式换一个，否则同轮两个子会话抢同一个文件
 const resumed = await runs.all(
   live.map((index) => ({
-    key: names[index] + "-r2",
+    key: keys[index] + "-r2",
     resume: first[index].runId,
     output: false,
     task: packetFor(index),
@@ -181,12 +201,19 @@ const retried =
     ? []
     : await runs.all(
         stale.map((slot) => ({
-          key: names[live[slot]] + "-r2-fresh",
+          key: keys[live[slot]] + "-r2-fresh",
           agent: "oracle",
           model: modelRef(seats[live[slot]]),
           context: "fresh",
           output: false,
-          task: packetFor(live[slot]) + "\n\n【你自己的第一轮答案（请在它基础上修订）】\n" + first[live[slot]].text,
+          // fresh 是没有上下文的：必须把原题单重新给它，否则它会对着一堆别人的答案
+          // 回答一个它没见过的问题（不报错、不缺席，主持人只看到答非所问）
+          task:
+            brief +
+            "\n\n========\n\n" +
+            packetFor(live[slot]) +
+            "\n\n【你自己的第一轮答案（请在它基础上修订）】\n" +
+            first[live[slot]].text,
         })),
       );
 
@@ -201,24 +228,32 @@ function rowOf(index) {
   return { ok: false, error: (row && row.error) || (retryRow && retryRow.error) || "质询轮失败" };
 }
 
+const round2 = seats.map((seat, index) => {
+  const result = rowOf(index);
+  if (!result.ok) return { seat: names[index], ok: false, error: result.error, text: "" };
+  const text = cleanText(result.row && result.row.output ? String(result.row.output) : "");
+  return {
+    seat: names[index],
+    ok: true,
+    resumed: result.resumed,
+    runId: result.row && result.row.runId ? result.row.runId : null,
+    stance: stanceOf(text),
+    text: text,
+    ...effortOf(result.row, text),
+  };
+});
+
 return {
   tag,
   rounds: 2,
   ...summary,
+  // 票型必须用第二轮立场：第二轮出现改判时，只用第一轮的 stance 就是报旧票型（实测发生过）
+  perSeat: summary.perSeat.map((row, index) => {
+    const second = round2[index];
+    const revised = second && second.ok && second.stance ? second.stance : null;
+    return { ...row, stance: revised !== null ? revised : row.stance, stanceRound: revised !== null ? 2 : 1 };
+  }),
   anonymity: seats.map((seat, index) => names[index] + " = 顾问 " + LETTERS[index]).join(" / "),
   round1: first,
-  round2: seats.map((seat, index) => {
-    const result = rowOf(index);
-    if (!result.ok) return { seat: names[index], ok: false, error: result.error, text: "" };
-    const text = cleanText(result.row && result.row.output ? String(result.row.output) : "");
-    return {
-      seat: names[index],
-      ok: true,
-      resumed: result.resumed,
-      runId: result.row && result.row.runId ? result.row.runId : null,
-      stance: stanceOf(text),
-      text: text,
-      ...effortOf(result.row, text),
-    };
-  }),
+  round2: round2,
 };

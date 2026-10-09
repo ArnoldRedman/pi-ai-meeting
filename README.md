@@ -21,7 +21,7 @@ pi install git:github.com/ArnoldRedman/pi-ai-meeting
 # git，钉住某个版本
 pi install git:github.com/ArnoldRedman/pi-ai-meeting@v1.0.0
 
-# npm（发布后可用）
+# npm（尚未发布到 npm，发布后可用）
 pi install npm:pi-ai-meeting
 ```
 
@@ -91,8 +91,9 @@ pi remove git:github.com/ArnoldRedman/pi-ai-meeting
 
 每场会开完，skill 都会拿**中位数**比一遍各席耗时，然后单独报一段：
 
-- **某席 ≥ 中位数 × 2.5**（且多出 60 秒以上）→ 报它拖时间；如果它的 thinking 档明显高于其他席，**先判定是档位问题**，建议降档而不是踢人。
-- **某席 ≤ 中位数 × 0.4** 且答案明显更短、`turns` 更低 → 报它**疑似没读材料**（浑水摸鱼）；反过来，快但答案长度正常就只是模型快，不误报。
+- **某席 ≥ 中位数 × 2.0**（且多出 60 秒以上）→ 报它拖时间；如果它的 thinking 档明显高于其他席，**先判定是档位问题**，建议降档而不是踢人。
+- **`turns` 低得明显**（≤ 其他席位中位数一半且 ≤ 2）→ 报它**疑似没读材料**（浑水摸鱼）；快但 `turns` 正常就只是模型快，不误报。长短和 token 数只当参考——实测用它俩定案会误伤。
+- 阈值是实测校准过的：旧版写 2.5×，一场会里某席 2.46×（436.7s vs 中位数 177.5s，比其他三席之和还多）刚好漏报，所以降到 2.0×。
 - 建议一律三选一：降档重开 / 用 `/ai-meeting:config` 减席位 / 换模型，**不代替你改配置**。
 - 反误报：快但输入 token 与答案长度都正常 → 只当"模型快"，不报摸鱼。
 
@@ -147,11 +148,14 @@ pi update git:github.com/ArnoldRedman/pi-ai-meeting   # 让已安装的 checkout
 
 在会话中改了 `SKILL.md` 后，`/reload` 生效。**不要**再往 `~/.pi/agent/skills/` 里放一份同名副本 —— 同名 skill 冲突时 Pi 保留先发现的并只打个警告，本地副本会静默盖掉包里的版本。
 
-改了 `references/meeting.js` 里的文本处理（`cleanText` / `stanceOf`）后跑一次自检：
+改了 `references/meeting.js` 里的文本处理（`cleanText` / `stanceOf`）或扩展里的配置读写（`readConfig` / `validate`）后跑自检：
 
 ```bash
-node tests/clean-text.test.mjs
+node tests/clean-text.test.mjs   # 抹 harness 报告块、抽【结论】行
+node tests/config.test.mjs       # 坏配置不被误当成"没配置"，校验不抛异常
 ```
+
+两个测试都是**直接从产品源码里抠出函数来跑**（`tests/extract.mjs`），不在测试里重写一份，所以不会漂移。
 
 发 npm 包前留意 `package.json` 的 `files`：新增资源目录（如 `extensions/`）必须加进去，否则 npm 路线装出来的包会缺东西。
 

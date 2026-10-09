@@ -66,7 +66,9 @@ description: |
 
 ```js
 subagent({
-  workflow: "<本 skill 目录>/references/meeting.js",
+  // 把 <skill 目录> 换成你系统提示里 ai-meeting skill 的真实目录（就是 SKILL.md 所在的上一级），
+  // 不要把这个占位符原样照抄，也不要把 references/meeting.js 的代码复制进回复
+  workflow: "<skill 目录>/references/meeting.js",
   async: true,
   timeoutMs: 1800000,
   args: {
@@ -83,6 +85,7 @@ subagent({
   门控靠这里：两种都在**启动前**决定；`cross: true` 时若第一轮高度一致，第二轮直接当没发生、不当依据即可。**不要为了补质询轮重跑第一轮。**
 - `brief` 要自包含：席位是 fresh 上下文，没有你的上一轮。长材料**写绝对路径让它们自己 `read`**（`args` 上限 16 KiB）。
 - 返回值里每个席位都带 `runId`（第一轮、第二轮各一个），后续轮次用它 `resume`——不要重跑第一轮。
+- `seat` 是配置里的 `name`（给人看的）；两席同名时脚本会把 key 自动去重成 `probe-b` / `probe-b-2`，**票型里要用 `key` 区分它们**，别写成两个一样的名字。
 - `async: true` 会先返回执据，完成才有返回值：**等到通知/返回值再汇总**，不要凭开会过程中的局部输出下结论。
 
 3. **会后必做四件事**（顺序固定，缺一件算没做完）：
@@ -111,7 +114,7 @@ subagent({
    - 一票的方向也要列，别只报多数。方向用 A/B/C 标，票数用**席位数量**。
    - **四家四说（各 1 票）不要硬凑方向**：直接说"问题本身没收敛"，并建议重写问题单（通常是问法太宽）。
    - 统一时写「票型：统一（N/N）」，但**仍要单列唯一反对者或少数意见**——那往往是最有信息量的部分。
-   - 脚本返回值里每席都带 `stance`（从答案末尾的 `【结论】` 行抓的）；抓到 null 就回读原文自己归纳。
+   - 脚本返回值里每席都带 `stance`（从答案末尾的 `【结论】` 行抓的）**并已优先取第二轮**（第二轮出现改判时，只用第一轮就是报旧票型——实测发生过）；`stanceRound` 标明它来自哪一轮。抓到 null 就回读原文自己归纳。
 
    **③ 分三类**（做法见 `references/question-design.md`）：**真洞 / 我已知的取舍 / 空话**；**逐条回读原文验证**，不当传声筒；单列"**谁改了什么主意**"。
 
@@ -141,29 +144,27 @@ subagent({
 
 **耗时从哪来（结构化，别解析文本）**
 
-每个席位返回的 `asyncDir` 下都有 `status.json`，单席耗时在 `steps[0].durationMs`（毫秒），同一文件里还有 `steps[0].model`（含档位）、`turnCount`、`totalTokens`、`totalCost`。用一条命令把全部席位一次性读出来（把 `<asyncDir...>` 换成各席的 asyncDir）：
+每个席位返回的 `asyncDir` 下都有 `status.json`，单席耗时在 `steps[0].durationMs`（毫秒），同一文件里还有 `steps[0].model`（含档位）、`turnCount`、`totalTokens`。把各席 `asyncDir` 换成自己的路径跑：
 
 ```bash
-python -c "
-import json,sys
-for p in sys.argv[1:]:
-    d=json.load(open(p+'/status.json',encoding='utf-8')); s=(d.get('steps') or [{}])[0]
-    print(s.get('model'), s.get('durationMs'), 'ms  turns=', d.get('turnCount'), 'inTok=', (d.get('totalTokens') or {}).get('input'))
-" <asyncDir...>
+node -e "for (const p of process.argv.slice(1)) { const s = JSON.parse(require('fs').readFileSync(p + '/status.json', 'utf8')); const st = (s.steps || [{}])[0]; console.log(st.model, st.durationMs + 'ms', 'turns=' + s.turnCount, 'inTok=' + (s.totalTokens || {}).input); }" <asyncDir...>
 ```
 
-重点是**不要从 call trace 里数字符**（那份文本只是给人看的冗余副本）。
+- 这是 **pi-subagents 的内部布局**，不是公开契约（另一条路——读返回值里的耗时——实测走不通：`results[0]` 里没有时间字段，`progressSummary` 已被投影掉）。**读不到就直说"耗时未知"**，不要拿别的数字充数。
+- 优先用 `node`（pi 的宿主运行时）；没有就用 python 或任何能读 JSON 的方式，都没有就报未知。**不要为此安装任何东西**。
+- 重点是**不要从 call trace 里数字符**（那份文本只是给人看的冗余副本，实测两处数字都不相等）。
 
 **判据（≥3 席才判；2 席分不出谁是异类，别报）**
 
-一切用**中位数**比，不用绝对秒数——子会话有秒级固定开销，且**同一席位跨场能拖 6 倍**（实测同一句"只回复 ok"：deepseek-flash 两场 33.9 秒 / 5.2 秒；两席同题 3.8 秒 / 13.9 秒）。所以绝对秒数没意义。
+一切用**中位数**比，不用绝对秒数——子会话有秒级固定开销，且**同一席位跨场能拖 6 倍**（实测同一句"只回复 ok"：deepseek-flash 两场 33.9 秒 / 5.2 秒）。
 
-1. **慢席位**：某席 ≥ 中位数 × 2.5，且比中位数多 60 秒以上。两个条件都要（单场光看比值就是噪声）。
-2. **先看档位再下结论**：`steps[0].model` 尾部就是档位（`provider/model:xhigh`）。该席档位明显高于其他席（xhigh/max vs medium/high）时，**慢的主因很可能是档位而不是模型**——先建议降一档重开一场，别急着踢人。
-3. **快得反常（疑似没读材料）**：某席 ≤ 中位数 × 0.4 且比中位数少 60 秒以上，**同时**有下面任一条客观证据：
-   - `totalTokens.input` 明显低于别人（同 brief 同材料，少几倍就是没读）；
-   - `perSeat.chars` 低于中位数约 60% 以下，或 `turns` 更低。
-   **反向甄别**：快但输入 token 与答案长度都正常 → 只是模型快，不是摸鱼，**不要误报**。
+1. **慢席位**：某席 ≥ 中位数 × **2.0**，且比中位数多 60 秒以上。两个条件都要（单场光看比值就是噪声）。
+   阈值原本是 2.5×，实测漏报过一次：grok 436.7 秒 / 中位数 177.5 秒 = 2.46×，它一个席位比其他三席之和还多，却没报警。你原话是"两三倍就该提醒"——所以改成 2.0×。
+2. **先看档位再下结论**：`steps[0].model` 尾部就是档位（`provider/model:xhigh`）。该席档位明显高于其他席（xhigh/max vs medium/high）时，**慢的主因很可能是档位而不是模型**——先建议降一档重开一场，别急着踢人。（同一场实测：grok 是唯一 xhigh，436.7 秒；其余 medium/medium/high，65.4 / 95.8 / 259.2 秒。）
+3. **快得反常（疑似没读材料）**：唯一可靠的判据是 **`turns`（它到底调了多少次工具）明显偏低**——≤ 其他席位中位数的一半且 ≤ 2。
+   慢席位 `turns` 自然高（实测 47 与 67），真读了文件的席位在 5 上下；没读的就是 1–2。
+   - `totalTokens.input` 和 `chars` **只能当参考，不能单独立案**：实测有席位 65.4 秒（0.37× 中位数）、输入 token 只有同族席位的 91%，但 `turns` 与它完全相同（都是 5），而且它独立报出了两个真 bug。凭 token/长度判它"摸鱼"就是误伤。
+   - **反向甄别**：快 + `turns` 正常 → 就是模型快，**不报**。
 
 **怎么告诉用户**
 

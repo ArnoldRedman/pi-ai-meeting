@@ -1,32 +1,12 @@
 // meeting.js 里两段纯文本逻辑的自检：cleanText（抹掉 harness 报告块）与 stanceOf（抓【结论】行）
 //
 //   node tests/clean-text.test.mjs
-//
-// 直接从脚本里抠出函数本体来测，避免测试里重写一份导致与实现漂移。
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { grab, readSource } from "./extract.mjs";
 
-const script = join(dirname(fileURLToPath(import.meta.url)), "..", "skills", "ai-meeting", "references", "meeting.js");
-const src = readFileSync(script, "utf8");
-
-// 按函数名抠出源码（大括号配平），再 eval 出来——测的就是脚本里那一份
-function grab(name) {
-  const start = src.indexOf(`function ${name}(`);
-  assert.ok(start >= 0, `脚本里找不到 ${name}`);
-  let depth = 0;
-  for (let i = src.indexOf("{", start); i < src.length; i += 1) {
-    if (src[i] === "{") depth += 1;
-    else if (src[i] === "}") {
-      depth -= 1;
-      if (depth === 0) return src.slice(start, i + 1);
-    }
-  }
-  throw new Error(`${name} 的大括号不配平`);
-}
-const cleanText = eval(`(${grab("cleanText")})`);
-const stanceOf = eval(`(${grab("stanceOf")})`);
+const src = readSource("../skills/ai-meeting/references/meeting.js");
+const cleanText = eval(`(${grab(src, "cleanText")})`);
+const stanceOf = eval(`(${grab(src, "stanceOf")})`);
 
 // 真实抓到的污染样本：gpt-6.1-sol 在一次普通表态里自己塞的 acceptance-report 块
 const polluted = '```acceptance-report\n{\n  "criteriaSatisfied": [{"id": "criterion-1", "status": "satisfied"}],\n  "changedFiles": []\n}\n```\n\n① 首轮应形成结论并标明分歧。\n\n【结论】首轮先出结论，有实质分歧再开第二轮。';
