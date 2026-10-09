@@ -147,28 +147,33 @@ subagent({
 每个席位返回的 `asyncDir` 下都有 `status.json`，单席耗时在 `steps[0].durationMs`（毫秒），同一文件里还有 `steps[0].model`（含档位）、`turnCount`、`totalTokens`。把各席 `asyncDir` 换成自己的路径跑：
 
 ```bash
-node -e "for (const p of process.argv.slice(1)) { const s = JSON.parse(require('fs').readFileSync(p + '/status.json', 'utf8')); const st = (s.steps || [{}])[0]; console.log(st.model, st.durationMs + 'ms', 'turns=' + s.turnCount, 'inTok=' + (s.totalTokens || {}).input); }" <asyncDir...>
+node -e "const fs=require('fs'),args=process.argv.slice(1),i=args.indexOf('--');const pats=args.slice(0,i<0?0:i),dirs=args.slice(i+1);for(const p of dirs){const st=JSON.parse(fs.readFileSync(p+'/status.json','utf8')),s=(st.steps||[{}])[0];const ms=s.durationMs||(st.endedAt-st.startedAt);const calls=[];for(const line of fs.readFileSync(p+'/events.jsonl','utf8').split('\n')){if(!line)continue;let e;try{e=JSON.parse(line)}catch{continue}if(e.type==='tool_execution_start')calls.push(e.toolName+' '+JSON.stringify(e.args||{}))}const hits=pats.filter(pt=>calls.some(c=>c.includes(pt)));const names={};for(const c of calls){const n=c.split(' ')[0];names[n]=(names[n]||0)+1}console.log((st.workflowKey||'').padEnd(8),Math.round(ms/1000)+'s','tools='+st.toolCount,'turns='+st.turnCount,'inTok='+(st.totalTokens||{}).input,'| 工具:',JSON.stringify(names),'| 碰过材料',hits.length+'/'+pats.length)}" "<关键材料名或路径片段 1>" "<片段 2>" -- <asyncDir...>
 ```
 
-- 这是 **pi-subagents 的内部布局**，不是公开契约（另一条路——读返回值里的耗时——实测走不通：`results[0]` 里没有时间字段，`progressSummary` 已被投影掉）。**读不到就直说"耗时未知"**，不要拿别的数字充数。
+- 这是 **pi-subagents 的内部布局**，不是公开契约（另一条路——读返回值里的耗时——实测走不通：`results[0]` 里连时间字段都没有，`progressSummary` 已被投影掉）。**读不到就直说"耗时未知"**，不要拿别的数字充数。
 - 优先用 `node`（pi 的宿主运行时）；没有就用 python 或任何能读 JSON 的方式，都没有就报未知。**不要为此安装任何东西**。
-- 重点是**不要从 call trace 里数字符**（那份文本只是给人看的冗余副本，实测两处数字都不相等）。
+- `--` 后面是各席 asyncDir，前面是本次材料的关键字（文件名片段就够）。
 
-**判据（≥3 席才判；2 席分不出谁是异类，别报）**
+**判据一：谁在拖时间（≥3 席才判；2 席分不出谁是异类）**
 
-一切用**中位数**比，不用绝对秒数——子会话有秒级固定开销，且**同一席位跨场能拖 6 倍**（实测同一句"只回复 ok"：deepseek-flash 两场 33.9 秒 / 5.2 秒）。
+用**中位数**比，不用绝对秒数——子会话有秒级固定开销，且**同一席位跨场能拖 6 倍**（实测同一句"只回复 ok"：deepseek-flash 两场 33.9 秒 / 5.2 秒）。
 
 1. **慢席位**：某席 ≥ 中位数 × **2.0**，且比中位数多 60 秒以上。两个条件都要（单场光看比值就是噪声）。
-   阈值原本是 2.5×，实测漏报过一次：grok 436.7 秒 / 中位数 177.5 秒 = 2.46×，它一个席位比其他三席之和还多，却没报警。你原话是"两三倍就该提醒"——所以改成 2.0×。
-2. **先看档位再下结论**：`steps[0].model` 尾部就是档位（`provider/model:xhigh`）。该席档位明显高于其他席（xhigh/max vs medium/high）时，**慢的主因很可能是档位而不是模型**——先建议降一档重开一场，别急着踢人。（同一场实测：grok 是唯一 xhigh，436.7 秒；其余 medium/medium/high，65.4 / 95.8 / 259.2 秒。）
-3. **快得反常（疑似没读材料）**：唯一可靠的判据是 **`turns`（它到底调了多少次工具）明显偏低**——≤ 其他席位中位数的一半且 ≤ 2。
-   慢席位 `turns` 自然高（实测 47 与 67），真读了文件的席位在 5 上下；没读的就是 1–2。
-   - `totalTokens.input` 和 `chars` **只能当参考，不能单独立案**：实测有席位 65.4 秒（0.37× 中位数）、输入 token 只有同族席位的 91%，但 `turns` 与它完全相同（都是 5），而且它独立报出了两个真 bug。凭 token/长度判它"摸鱼"就是误伤。
-   - **反向甄别**：快 + `turns` 正常 → 就是模型快，**不报**。
+   阈值原本是 2.5×，实测漏报过一次：grok 436.7 秒 / 中位数 177.5 秒 = 2.46×，它一个席位比其他三席之和还多，却没报警。
+2. **先看档位**：`steps[0].model` 尾部就是档位（`provider/model:xhigh`）。该席档位明显高于其他席（xhigh/max vs medium/high）时，**先建议降一档重开一场**，别急着踢人。（实测：grok 是唯一 xhigh，436.7 秒。）
+3. **再看调用构成**：实测同样覆盖全部材料，一个席位用 **4 次批量 bash**（65 秒），另一个用 **79 次细碎 grep/read**（437 秒）——**慢的原因常常是调用碎，不是干得多**。看到慢席位 `tools` 数极高时，把它说成"调用碎 + 往返开销"，别污蔑它效率低；降档或换模型才是对症的。
+
+**判据二：有没有真读材料（只看直接证据）**
+
+**唯一算数的证据是它到底碰没碰过材料**：命令里的"碰过材料 N/M"就是从工具调用参数里数出来的（不管它用 `read` 还是用 `bash`+`nl` 把文件打出来，都算碰上）。
+
+- **N/M 满 → 不是摸鱼**，无论它多快。实测反例：astra 65.4 秒（0.37× 中位数）、输入 token 只有同族席位的 91%，但它 4 次批量 bash 覆盖了全部材料，还自己写了脚本复现出一个真 bug——凭"快 + 短 + token 少"判它摸鱼就是误伤。
+- **N/M 为 0–1 且 tools 极少（≤2）** → 才说"疑似没读材料"，并把命中情况直接摆给用户（"它一次都没打开过 X"是事实，不是推断）。
+- **不要拿 `turns`／`inTok`／`chars` 当判据**：一个 turn 里可以并发多个工具调用，所以 turns 会严重少算工作量（实测 astra 5 turns / 4 tools 就翻完了整个仓库，grok 47 turns 做的是同一件事）；token 与字符数则受模型风格影响。这三个数字只能当上下文。
 
 **怎么告诉用户**
 
-在结论前面单独一段，写三件事：① 每席耗时与中位数（秒）；② 你的判断是三种里的哪一种——**档位问题** / **疑似没读材料** / **只是快**；③ 建议三选一：**降档重开** / **用 `/ai-meeting:config` 把那一席踢掉改成 N-1 席** / **换一个模型**。
+在结论前面单独一段，写三件事：① 每席耗时与中位数（秒）；② 你的判断——**档位/调用风格问题** / **疑似没读材料（附命中数）** / **只是快**；③ 建议三选一：**降档重开** / **用 `/ai-meeting:config` 把那一席减掉改成 N-1 席** / **换一个模型**。
 
 另外三条纪律：
 
