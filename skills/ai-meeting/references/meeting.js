@@ -15,8 +15,12 @@
 //   tag:   可选，只用来在返回值里标记本场会议，例如 "设定-0725"
 //
 // 返回值里每个席位都带第一轮/第二轮的 runId：后续投票轮、验收轮可以拿它 resume，
-// 不必重跑第一轮。需要留档就在汇总时自己写一次文件，子会话的 output 一律关掉
-// （开了会在返回文本里多一句 "Output saved to: ..."，污染下一轮喂给别家的答案）
+// 不必重跑第一轮。
+//
+// 耗时：单席位用时脚本里拿不到（run 结果没有时间字段），但在每个席位 asyncDir 的
+// status.json 里有 steps[0].durationMs，父会话按 runId/asyncDir 去读即可。
+// 所以返回值给客观数字（答案长度、turns、输入 token、cost、asyncDir），快慢判断由
+// 父会话按 SKILL.md 的流程做。
 
 const seats = Array.isArray(args.seats) ? args.seats : [];
 if (seats.length === 0) throw new Error("args.seats 为空：先读 ai-meeting.json，把 seats 传进来");
@@ -35,6 +39,43 @@ function modelRef(seat) {
   return seat.provider + "/" + seat.model + ":" + seat.thinking;
 }
 
+// 子会话自己的用量：turns 低 + 答案短 + 输入 token 少，是"没真读材料"的客观证据
+// 耗时不在 run 结果里，但在 asyncDir/status.json 的 steps[0].durationMs（父会话去读）
+function effortOf(row, text) {
+  const single = row && Array.isArray(row.results) && row.results[0] ? row.results[0] : null;
+  const usage = single && single.usage ? single.usage : null;
+  return {
+    chars: text.length,
+    turns: usage && typeof usage.turns === "number" ? usage.turns : null,
+    inputTokens: usage && typeof usage.input === "number" ? usage.input : null,
+    cost: usage && typeof usage.cost === "number" ? usage.cost : null,
+    asyncDir: row && typeof row.asyncDir === "string" ? row.asyncDir : null,
+  };
+}
+
+// 有的供应商网关会在回答里塞一段 harness 报告（实测 gpt-6.1-sol 开头就是 ```acceptance-report 的 JSON）。
+// 它会污染第二轮喂给别家的答案、灌大 chars、干扰票型聚类，所以整段抹掉（不限位置，实测它也可能不在开头）
+// shortcut: 只认 acceptance-report 这个标签；以后发现有别的 harness 块就加进这个正则
+function cleanText(raw) {
+  return raw
+    .replace(/(?:^|\n)[ \t]*```(?:acceptance-report|acceptance_report)[\s\S]*?```[ \t]*\n?/g, "\n")
+    .trim();
+}
+
+// 问题单要求每席最后一行是【结论】<一句话>；抓不到就返回 null，由主持人自己读原文
+function stanceOf(text) {
+  const found = text.match(/【结论】[^\n]*/g);
+  if (!found || found.length === 0) return null;
+  return found[found.length - 1].replace("【结论】", "").trim();
+}
+
+function median(numbers) {
+  const sorted = numbers.filter((value) => typeof value === "number").sort((a, b) => a - b);
+  if (sorted.length === 0) return null;
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? sorted[mid] : Math.round((sorted[mid - 1] + sorted[mid]) / 2);
+}
+
 const names = seats.map(seatKey);
 
 // 第一轮：同题、并行、互相隔离（context fresh，否则后面的人会被前面的答案锚定）
@@ -51,22 +92,50 @@ const round1 = await runs.all(
   })),
 );
 
-const first = round1.map((row, index) => ({
-  seat: names[index],
-  model: modelRef(seats[index]),
-  ok: !!(row && row.ok),
-  runId: row && row.runId ? row.runId : null,
-  text: row && row.output ? String(row.output).trim() : "",
-}));
+const first = round1.map((row, index) => {
+  const text = cleanText(row && row.output ? String(row.output) : "");
+  return {
+    seat: names[index],
+    model: modelRef(seats[index]),
+    ok: !!(row && row.ok),
+    runId: row && row.runId ? row.runId : null,
+    stance: stanceOf(text),
+    text: text,
+    ...effortOf(row, text),
+  };
+});
 
-if (args.cross !== true) return { tag, rounds: 1, seats: first };
+const summary = {
+  perSeat: first.map((row) => ({
+    seat: row.seat,
+    model: row.model,
+    ok: row.ok,
+    stance: row.stance,
+    chars: row.chars,
+    turns: row.turns,
+    inputTokens: row.inputTokens,
+    cost: row.cost,
+    asyncDir: row.asyncDir,
+  })),
+  median: {
+    chars: median(first.map((row) => row.chars)),
+    turns: median(first.map((row) => row.turns)),
+    inputTokens: median(first.map((row) => row.inputTokens)),
+  },
+  summariseHint:
+    "按 stance 聚类成方向：按主张的可执行差异分，不按措辞分；票数=席位数量，方向内必须能一句话概括",
+  timingNote:
+    "耗时不在返回值里：读每个席位 asyncDir 下 status.json 的 steps[0].durationMs（结构化数据，别去解析 call trace）",
+};
+
+if (args.cross !== true) return { tag, rounds: 1, ...summary, seats: first };
 
 // 只让第一轮真给出了答案的席位参与互评：没答案的席位没什么可修订
 const live = [];
 for (let index = 0; index < first.length; index += 1) {
   if (first[index].ok && first[index].runId) live.push(index);
 }
-if (live.length < 2) return { tag, rounds: 1, crossSkipped: "有效席位不足 2 个，跳过交叉质询", seats: first };
+if (live.length < 2) return { tag, rounds: 1, crossSkipped: "有效席位不足 2 个，跳过交叉质询", ...summary, seats: first };
 
 // 第二轮：匿名互评。只喂别家答案、不告诉谁是谁，否则会变成"是我提的我就坚持"
 const LETTERS = "ABCDEFGH";
@@ -135,17 +204,21 @@ function rowOf(index) {
 return {
   tag,
   rounds: 2,
+  ...summary,
   anonymity: seats.map((seat, index) => names[index] + " = 顾问 " + LETTERS[index]).join(" / "),
   round1: first,
   round2: seats.map((seat, index) => {
     const result = rowOf(index);
     if (!result.ok) return { seat: names[index], ok: false, error: result.error, text: "" };
+    const text = cleanText(result.row && result.row.output ? String(result.row.output) : "");
     return {
       seat: names[index],
       ok: true,
       resumed: result.resumed,
       runId: result.row && result.row.runId ? result.row.runId : null,
-      text: result.row && result.row.output ? String(result.row.output).trim() : "",
+      stance: stanceOf(text),
+      text: text,
+      ...effortOf(result.row, text),
     };
   }),
 };

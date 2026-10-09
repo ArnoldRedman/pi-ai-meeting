@@ -6,6 +6,14 @@ Pi 的多模型会议 skill：把 3–5 个**不同模型**（各带自己的供
 
 ## 安装
 
+先装它依赖的 `pi-subagents`（**本包不自带，pi 也不内置**，缺了就没法开会）：
+
+```bash
+pi install npm:pi-subagents     # 提供 subagent 工具与 oracle agent
+```
+
+缺它的现象：工具列表里没有 `subagent`；就算绕过也会报 `Unknown agent 'oracle'`。注意**不要**把它写进本包的 `dependencies`——那样会和你自己装的那份重复注册。
+
 ```bash
 # git（推荐，跟着仓库 ref 走）
 pi install git:github.com/ArnoldRedman/pi-ai-meeting
@@ -24,6 +32,34 @@ pi list                          # 查看已安装
 pi update git:github.com/ArnoldRedman/pi-ai-meeting
 pi remove git:github.com/ArnoldRedman/pi-ai-meeting
 ```
+
+> **移除时会残留一个配置文件**：`pi remove` 只清包目录和 settings 条目，**不动 `~/.pi/agent/ai-meeting.json`**（那是你自己配的席位表，扩展也没有卸载钩子能清自己）。想干净移除就先删它：
+>
+> ```bash
+> rm ~/.pi/agent/ai-meeting.json      # Windows: del "%USERPROFILE%\.pi\agent\ai-meeting.json"
+> pi remove git:github.com/ArnoldRedman/pi-ai-meeting
+> ```
+>
+> 没跑过 `/ai-meeting:config` 就不会有任何残留。
+
+## 每场会结束时给什么
+
+不是"总结一次"就完了，而是四件东西：
+
+1. **谁在拖时间 / 谁在摸鱼**（见上一节）；
+2. **票型图**——先说清**统一还是未统一**；未统一就列 `A「保留原机制」2 票 —— sol、grok` / `B「换新机制」1 票 —— astra` / `C「先不动」1 票 —— ds`，每方向一句话主张 ＋ 代价，并说清**分歧的实质**（争的是改动幅度？代价归属？还是信息不够？）；
+3. **三类分**：真洞 / 已知取舍 / 空话 ＋ "谁改了什么主意"；
+4. **下一步菜单**（带代价，不替你选）：
+
+```text
+1. 采用 A —— 直接出具体改法
+2. 四席二轮会：A/B/C 匿名重投，看票型是否移动
+3. 三席两轮会（交叉验证）：移出最边缘一席让 A/B 对撞，目标收敛 —— 只传 seats 子集，不用改配置
+4. 只深挖某一方向：把它写成待验证假设，让各席找反例与失效条件
+5. 你给一个新方向：写进问题单开二轮
+```
+
+上限**两轮**（表态 + 收敛）：第二轮仍分裂就不再开会，把分歧和各自代价摆给你拍板。
 
 ## 配置席位
 
@@ -50,6 +86,17 @@ pi remove git:github.com/ArnoldRedman/pi-ai-meeting
 - `name` 是席位简称，必须唯一；`note` 只给人看。
 - 改过模型配置后，在 pi 里按一次 `/model` 重载注册表，否则席位会硬失败（`Unknown subagent model ...`）。
 - 席位数 3–5 合适；同一个模型挂在两个供应商别名下**不算**独立视角。
+
+## 会自动报「谁在拖时间」
+
+每场会开完，skill 都会拿**中位数**比一遍各席耗时，然后单独报一段：
+
+- **某席 ≥ 中位数 × 2.5**（且多出 60 秒以上）→ 报它拖时间；如果它的 thinking 档明显高于其他席，**先判定是档位问题**，建议降档而不是踢人。
+- **某席 ≤ 中位数 × 0.4** 且答案明显更短、`turns` 更低 → 报它**疑似没读材料**（浑水摸鱼）；反过来，快但答案长度正常就只是模型快，不误报。
+- 建议一律三选一：降档重开 / 用 `/ai-meeting:config` 减席位 / 换模型，**不代替你改配置**。
+- 反误报：快但输入 token 与答案长度都正常 → 只当"模型快"，不报摸鱼。
+
+耗时不在脚本返回值里（run 结果没有时间字段），但每个席位的 `asyncDir` 下都有 `status.json`，`steps[0].durationMs` 就是它的真实用时；脚本另外提供 `chars`/`turns`/`inputTokens`/`cost` 作为"有没有真读材料"的配套证据。
 
 ## 内容
 
@@ -82,11 +129,11 @@ subagent({
 
 ## 前置条件
 
-需要 `pi-subagents` 提供 `subagent` 工具与 `oracle` agent（本包不自带）：
-
-```bash
-pi install npm:pi-subagents
-```
+| 依赖 | 为什么需要 | 缺了怎么办 |
+|---|---|---|
+| **`pi-subagents`**（额外安装，非 pi 内置） | 开会用的 `subagent` 工具、`oracle` agent、`runs.all` 编排都来自它；耗时甄别读的 `status.json` 也是它写的 | `pi install npm:pi-subagents` |
+| 至少 3 个已认证的不同模型 | 少于 3 席分不出独立视角，也判不了耗时异常 | `/ai-meeting:config` 会自动从你已认证的模型里选；不够就去配供应商 |
+| pi 编码代理（宿主） | 扩展 import 宿主接口；已在 `peerDependencies` 里声明 | 无 |
 
 ## 维护
 
@@ -99,6 +146,14 @@ pi update git:github.com/ArnoldRedman/pi-ai-meeting   # 让已安装的 checkout
 ```
 
 在会话中改了 `SKILL.md` 后，`/reload` 生效。**不要**再往 `~/.pi/agent/skills/` 里放一份同名副本 —— 同名 skill 冲突时 Pi 保留先发现的并只打个警告，本地副本会静默盖掉包里的版本。
+
+改了 `references/meeting.js` 里的文本处理（`cleanText` / `stanceOf`）后跑一次自检：
+
+```bash
+node tests/clean-text.test.mjs
+```
+
+发 npm 包前留意 `package.json` 的 `files`：新增资源目录（如 `extensions/`）必须加进去，否则 npm 路线装出来的包会缺东西。
 
 发版：改 `package.json` 的 `version` → 提交 → `git tag -a v1.1.0 -m v1.1.0 && git push --tags`；钉版本的用法是 `pi install git:github.com/ArnoldRedman/pi-ai-meeting@v1.1.0`。
 
