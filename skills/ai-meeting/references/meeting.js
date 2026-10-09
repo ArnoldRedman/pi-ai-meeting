@@ -134,6 +134,8 @@ const summary = {
     lastInputTokens: row.lastInputTokens,
     cost: row.cost,
     asyncDir: row.asyncDir,
+    // 没跑第二轮时立场就是第一轮的；两轮路径会把改判过的覆写成 2
+    stanceRound: 1,
   })),
   median: {
     chars: median(first.map((row) => row.chars)),
@@ -229,10 +231,11 @@ function rowOf(index) {
 
 const round2 = seats.map((seat, index) => {
   const result = rowOf(index);
-  if (!result.ok) return { seat: names[index], ok: false, error: result.error, text: "" };
+  if (!result.ok) return { seat: names[index], model: modelRef(seat), ok: false, error: result.error, text: "" };
   const text = cleanText(result.row && result.row.output ? String(result.row.output) : "");
   return {
     seat: names[index],
+    model: modelRef(seat),
     ok: true,
     resumed: result.resumed,
     runId: result.row && result.row.runId ? result.row.runId : null,
