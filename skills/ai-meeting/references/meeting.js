@@ -55,15 +55,15 @@ function modelRef(seat) {
   return seat.provider + "/" + seat.model + ":" + seat.thinking;
 }
 
-// 子会话自己的用量：turns 低 + 答案短 + 输入 token 少，是"没真读材料"的客观证据
-// 耗时不在 run 结果里，但在 asyncDir/status.json 的 steps[0].durationMs（父会话去读）
+// 子会话自己的用量：turns/chars 是风格指示，lastInputTokens 只是「最后一次请求的新增输入」——
+// 它不等于成本：成本看的是「请求次数 × 每次重发的上下文总量」，那个只能从 asyncDir/events.jsonl 里汇总
 function effortOf(row, text) {
   const single = row && Array.isArray(row.results) && row.results[0] ? row.results[0] : null;
   const usage = single && single.usage ? single.usage : null;
   return {
     chars: text.length,
     turns: usage && typeof usage.turns === "number" ? usage.turns : null,
-    inputTokens: usage && typeof usage.input === "number" ? usage.input : null,
+    lastInputTokens: usage && typeof usage.input === "number" ? usage.input : null,
     cost: usage && typeof usage.cost === "number" ? usage.cost : null,
     asyncDir: row && typeof row.asyncDir === "string" ? row.asyncDir : null,
   };
@@ -131,14 +131,13 @@ const summary = {
     stance: row.stance,
     chars: row.chars,
     turns: row.turns,
-    inputTokens: row.inputTokens,
+    lastInputTokens: row.lastInputTokens,
     cost: row.cost,
     asyncDir: row.asyncDir,
   })),
   median: {
     chars: median(first.map((row) => row.chars)),
     turns: median(first.map((row) => row.turns)),
-    inputTokens: median(first.map((row) => row.inputTokens)),
   },
   summariseHint:
     "按 stance 聚类成方向：按主张的可执行差异分，不按措辞分；票数=席位数量，方向内必须能一句话概括",
@@ -146,14 +145,14 @@ const summary = {
     "耗时不在返回值里：读每个席位 asyncDir 下 status.json 的 steps[0].durationMs（结构化数据，别去解析 call trace）",
 };
 
-if (args.cross !== true) return { tag, rounds: 1, ...summary, seats: first };
+if (args.cross !== true) return { tag, rounds: 1, ...summary, round1: first };
 
 // 只让第一轮真给出了答案的席位参与互评：没答案的席位没什么可修订
 const live = [];
 for (let index = 0; index < first.length; index += 1) {
   if (first[index].ok && first[index].runId) live.push(index);
 }
-if (live.length < 2) return { tag, rounds: 1, crossSkipped: "有效席位不足 2 个，跳过交叉质询", ...summary, seats: first };
+if (live.length < 2) return { tag, rounds: 1, crossSkipped: "有效席位不足 2 个，跳过交叉质询", ...summary, round1: first };
 
 // 第二轮：匿名互评。只喂别家答案、不告诉谁是谁，否则会变成"是我提的我就坚持"
 const LETTERS = "ABCDEFGH";
