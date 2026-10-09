@@ -1,0 +1,17 @@
+{
+  "name": "pi-ai-meeting",
+  "version": "1.0.0",
+  "description": "多模型会议 skill：并行独立表态、匿名交叉质询、投票定案、验收修改",
+  "keywords": ["pi-package", "pi", "pi-skill", "skill", "multi-model", "ai-meeting"],
+  "license": "MIT",
+  "author": {
+    "name": "ArnoldRedman",
+    "url": "https://github.com/ArnoldRedman"
+  },
+  "homepage": "https://github.com/ArnoldRedman/pi-ai-meeting",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ArnoldRedman/pi-ai-meeting.git"
+  },
+  "files": ["skills/", "README.md", "LICENSE"]
+}
