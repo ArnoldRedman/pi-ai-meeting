@@ -38,7 +38,7 @@ pi install npm:pi-subagents     # 提供 subagent 工具与 oracle agent
 pi install git:github.com/ArnoldRedman/pi-ai-meeting
 
 # git，钉住某个版本
-pi install git:github.com/ArnoldRedman/pi-ai-meeting@v1.4.0
+pi install git:github.com/ArnoldRedman/pi-ai-meeting@v1.4.1
 
 # npm（尚未发布到 npm，发布后可用）
 pi install npm:pi-ai-meeting
@@ -262,7 +262,7 @@ node tests/config.test.mjs       # 坏配置不被误当成"没配置"，校验�
 
 发 npm 包前留意 `package.json` 的 `files`：新增资源目录（如 `extensions/`）必须加进去，否则 npm 路线装出来的包会缺东西。
 
-发版：改 `package.json` 的 `version` → 提交 → `git tag -a v1.4.0 -m v1.4.0 && git push --tags`；钉版本的用法是 `pi install git:github.com/ArnoldRedman/pi-ai-meeting@v1.4.0`。
+发版：改 `package.json` 的 `version` → 提交 → `git tag -a v1.4.1 -m v1.4.1 && git push --tags`；钉版本的用法是 `pi install git:github.com/ArnoldRedman/pi-ai-meeting@v1.4.1`。
 
 发到 npm 后即可用 `pi install npm:pi-ai-meeting`：
 
@@ -270,6 +270,18 @@ node tests/config.test.mjs       # 坏配置不被误当成"没配置"，校验�
 npm login        # 需要交互
 npm publish
 ```
+
+## 为什么目前只做 Pi
+
+这个 skill 的核心需求是：**让不同模型在同一场会议里并行独立表态，再互相质询，并支持各席位分别选择供应商、模型和思考档位**。同一个模型开几个独立上下文也能讨论，但不能替代这里追求的模型多样性。
+
+Pi 可以在同一套环境里配置多个供应商及其认证，再通过 `pi-subagents` 为每个席位分别指定 `provider/model/thinking`。模型选择、并行执行和子会话续接都有现成能力，本项目可以集中处理问题单、交叉质询和会议结果。
+
+移植到 Codex、Claude Code 等平台，会议规则和提示词容易复用，执行层却不能直接照搬。目标平台是否允许子 agent 分别选择不同供应商，要看它的具体版本和接口；不能因为支持多个子 agent，就默认具备同样的跨供应商调度能力。
+
+跨平台并非做不到：可以启动多个 CLI 进程，或直接调用不同供应商的 API。但这意味着本项目还要负责跨进程调度、认证接入、超时与取消、会话恢复、结果格式和用量统计，并持续适配各平台的变化。工作范围会从一个会议 skill 扩大成一套多模型运行工具。
+
+**因此，目前只维护 Pi 版本。** Pi 已有的多供应商能力，加上 `pi-subagents` 的编排能力，正好承接本项目的需求。其他平台适配留待有明确需求时再评估；会议方法本身并不依赖 Pi，欢迎复用。
 
 ## License
 
