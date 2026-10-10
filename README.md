@@ -40,7 +40,7 @@ pi install git:github.com/ArnoldRedman/pi-ai-meeting
 # git，钉住某个版本
 pi install git:github.com/ArnoldRedman/pi-ai-meeting@v1.4.1
 
-# npm（尚未发布到 npm，发布后可用）
+# npm
 pi install npm:pi-ai-meeting
 ```
 
